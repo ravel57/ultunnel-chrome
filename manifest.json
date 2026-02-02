@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ULtunnel - browser-plugin",
   "version": "2.0",
-  "description": "Авто-переключение SOCKS5 127.0.0.1:56130 по доменам",
+  "description": "Авто-переключение SOCKS5 127.0.0.1:5613 по доменам",
   "permissions": ["proxy", "storage", "tabs", "debugger", "webRequest"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
