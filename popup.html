@@ -72,68 +72,41 @@
 			transform: translateX(20px);
 		}
 
-		.btn {
-			border: 1px solid rgba(0, 0, 0, .12);
-			background: #fff;
-			border-radius: 8px;
-			padding: 6px 10px;
-			font-size: 12px;
-			cursor: pointer;
-		}
-
-		.domainRow {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 10px;
-			padding: 6px 0;
-			border-bottom: 1px dashed rgba(0, 0, 0, .08);
-		}
-
-		.domainName {
-			font-size: 13px;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-			max-width: 240px;
-		}
-
 		.hint {
-			margin-top: 8px;
 			font-size: 12px;
 			opacity: .75;
+			margin-top: 8px;
+		}
+
+		.disabled {
+			opacity: .5;
+			pointer-events: none;
 		}
 	</style>
 </head>
 <body>
 <div class="row">
-	<div>VPN для этого сайта</div>
+	<div>Туннелировать весь трафик</div>
 	<label class="switch">
-		<input id="siteToggle" type="checkbox"/>
+		<input id="allToggle" type="checkbox"/>
 		<span class="slider"></span>
 	</label>
 </div>
-<div id="siteInfo" class="sub"></div>
+<div id="allInfo" class="sub"></div>
 
 <div class="divider"></div>
 
-<div class="row">
-	<div>Расширение активно</div>
-	<label class="switch">
-		<input id="globalToggle" type="checkbox"/>
-		<span class="slider"></span>
-	</label>
-</div>
-<div id="globalInfo" class="sub"></div>
-
-<div class="divider"></div>
-
-<div class="row">
-	<div>Домены через VPN</div>
-	<button id="clearBtn" class="btn">Очистить</button>
+<div id="siteBlock">
+	<div class="row">
+		<div>VPN для текущего сайта</div>
+		<label class="switch">
+			<input id="siteToggle" type="checkbox"/>
+			<span class="slider"></span>
+		</label>
+	</div>
+	<div id="siteInfo" class="sub"></div>
 </div>
 
-<div id="domains"></div>
 <div id="hint" class="hint"></div>
 
 <script src="popup.js"></script>

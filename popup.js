@@ -1,112 +1,80 @@
 const api = chrome;
 
-function $(id) {
-	return document.getElementById(id);
-}
+function $(id) { return document.getElementById(id); }
 
 async function getActiveTab() {
-	const [tab] = await api.tabs.query({active: true, currentWindow: true});
+	const [tab] = await api.tabs.query({ active: true, currentWindow: true });
 	return tab;
 }
 
-function getHostname(url) {
-	try {
-		return new URL(url).hostname.toLowerCase();
-	} catch {
-		return "";
-	}
-}
-
-function isHostCovered(host, domains) {
-	if (!host) return false;
-	for (const d of domains) {
-		if (host === d) return true;
-		if (host.endsWith("." + d)) return true;
-	}
-	return false;
-}
-
-function renderDomains(domains) {
-	const root = $("domains");
-	root.innerHTML = "";
-	if (!domains.length) {
-		root.innerHTML = `<div class="hint">Список пуст.</div>`;
-		return;
-	}
-	for (const d of domains) {
-		const row = document.createElement("div");
-		row.className = "domainRow";
-
-		const name = document.createElement("div");
-		name.className = "domainName";
-		name.title = d;
-		name.textContent = d;
-
-		const btn = document.createElement("button");
-		btn.className = "btn";
-		btn.textContent = "Удалить";
-		btn.onclick = async () => {
-			const res = await api.runtime.sendMessage({type: "removeDomain", domain: d});
-			if (res?.ok) renderDomains(res.domains || []);
-		};
-
-		row.appendChild(name);
-		row.appendChild(btn);
-		root.appendChild(row);
-	}
-}
-
 document.addEventListener("DOMContentLoaded", async () => {
+	const allToggle = $("allToggle");
 	const siteToggle = $("siteToggle");
-	const globalToggle = $("globalToggle");
-	const clearBtn = $("clearBtn");
+	const allInfo = $("allInfo");
+	const siteInfo = $("siteInfo");
+	const siteBlock = $("siteBlock");
 	const hint = $("hint");
 
 	const tab = await getActiveTab();
-	const host = getHostname(tab?.url || "");
+	const url = tab?.url || "";
 
-	$("siteInfo").textContent = host ? `Сайт: ${host}` : "Сайт: неизвестно (chrome:// и т.п.)";
-
-	const state = await api.runtime.sendMessage({type: "getState"});
-	if (!state?.ok) {
-		hint.textContent = "Не удалось получить состояние расширения.";
+	const st = await api.runtime.sendMessage({ type: "getPopupState", url });
+	if (!st?.ok) {
+		hint.textContent = "Не удалось получить состояние.";
+		allToggle.disabled = true;
 		siteToggle.disabled = true;
-		globalToggle.disabled = true;
 		return;
 	}
 
-	globalToggle.checked = !!state.enabled;
-	$("globalInfo").textContent = `SOCKS5 ${state.target}. Проксируются только домены из списка.`;
+	allToggle.checked = !!st.tunnelAll;
+	allInfo.textContent = `SOCKS5 ${st.target}`;
 
-	renderDomains(state.domains || []);
-	siteToggle.checked = isHostCovered(host, state.domains || []);
-
-	if (!host) {
+	if (!st.host) {
 		siteToggle.disabled = true;
-		hint.textContent = "На этой вкладке нельзя определить домен.";
+		siteInfo.textContent = "Сайт: неизвестно (chrome:// и т.п.)";
 	} else {
-		hint.textContent = "";
+		siteInfo.textContent = `Сайт: ${st.host}`;
 	}
 
-	globalToggle.addEventListener("change", async () => {
-		await api.runtime.sendMessage({type: "setEnabled", enabled: globalToggle.checked});
+	function refreshUiGlobalMode() {
+		if (allToggle.checked) {
+			siteBlock.classList.add("disabled");
+			hint.textContent = "Глобальный режим: туннелируется весь трафик браузера.";
+		} else {
+			siteBlock.classList.remove("disabled");
+			hint.textContent = "";
+		}
+	}
+
+	siteToggle.checked = !!st.siteEnabled;
+	refreshUiGlobalMode();
+
+	allToggle.addEventListener("change", async () => {
+		const res = await api.runtime.sendMessage({ type: "setTunnelAll", value: allToggle.checked });
+		if (!res?.ok) {
+			// rollback
+			allToggle.checked = !allToggle.checked;
+			hint.textContent = "Не удалось переключить режим.";
+			return;
+		}
+		refreshUiGlobalMode();
 	});
 
 	siteToggle.addEventListener("change", async () => {
-		if (!host) return;
-		const res = await api.runtime.sendMessage({
-			type: "setDomainEnabled",
-			domain: host,
-			enabled: siteToggle.checked
-		});
-		if (res?.ok) renderDomains(res.domains || []);
-	});
+		if (!st.host) return;
 
-	clearBtn.addEventListener("click", async () => {
-		const res = await api.runtime.sendMessage({type: "clearDomains"});
-		if (res?.ok) {
-			renderDomains([]);
-			siteToggle.checked = false;
+		const res = await api.runtime.sendMessage({
+			type: "setSiteEnabled",
+			host: st.host,
+			value: siteToggle.checked
+		});
+
+		if (!res?.ok) {
+			siteToggle.checked = !siteToggle.checked; // rollback
+			hint.textContent = res?.error ? `Ошибка: ${res.error}` : "Не удалось переключить сайт.";
+			return;
 		}
+
+		hint.textContent = "";
 	});
 });
