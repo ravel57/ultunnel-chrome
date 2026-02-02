@@ -1,32 +1,34 @@
 // background.js (MV3 service worker)
-// Auto-switch proxy by domain list (PAC), like SwitchyOmega.
+// 1) PAC auto-switch by domain list
+// 2) Auto-learn domains from ALL tab requests (Chrome webRequest) and add to tunnel list
 // Hardcoded proxy: SOCKS5 127.0.0.1:56130
 
 const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 56130;
 
 const STORAGE_KEYS = {
-    enabled: "enabled",
-    domains: "domains", // string[]
+	enabled: "enabled",     // boolean: use PAC or clear proxy
+	domains: "domains",     // string[]
+	autoLearn: "autoLearn", // boolean: auto-add domains from tab requests
 };
 
+const LIMIT_DOMAINS = 5000; // safety cap
+
 function normalizeDomain(d) {
-    return String(d || "")
-        .trim()
-        .toLowerCase()
-        .replace(/^\.+|\.+$/g, ""); // trim dots
+	return String(d || "")
+		.trim()
+		.toLowerCase()
+		.replace(/^\.+|\.+$/g, "");
 }
 
 function uniqueSorted(arr) {
-    return Array.from(new Set(arr)).sort((a, b) => a.localeCompare(b));
+	return Array.from(new Set(arr)).sort((a, b) => a.localeCompare(b));
 }
 
 function buildPac(domains) {
-    // domains: ["example.com", "sub.site.org"]
-    // Match rule: host == domain OR host endsWith("." + domain)
-    const domainsJson = JSON.stringify(domains);
+	const domainsJson = JSON.stringify(domains);
 
-    return `
+	return `
 var __DOMAINS__ = ${domainsJson};
 
 function __isDomainMatch(host, domain) {
@@ -39,7 +41,7 @@ function __isDomainMatch(host, domain) {
 function FindProxyForURL(url, host) {
   if (!host) return "DIRECT";
 
-  // Bypass local stuff
+  // Bypass local/private
   if (isPlainHostName(host)) return "DIRECT";
   if (dnsDomainIs(host, "localhost") || shExpMatch(host, "localhost.*")) return "DIRECT";
   if (isInNet(host, "127.0.0.0", "255.0.0.0")) return "DIRECT";
@@ -59,114 +61,165 @@ function FindProxyForURL(url, host) {
 }
 
 async function getState() {
-    const data = await chrome.storage.local.get([STORAGE_KEYS.enabled, STORAGE_KEYS.domains]);
-    const enabled = !!data[STORAGE_KEYS.enabled];
-    const domains = Array.isArray(data[STORAGE_KEYS.domains]) ? data[STORAGE_KEYS.domains] : [];
-    return { enabled, domains };
+	const data = await chrome.storage.local.get([STORAGE_KEYS.enabled, STORAGE_KEYS.domains, STORAGE_KEYS.autoLearn]);
+	const enabled = typeof data[STORAGE_KEYS.enabled] === "boolean" ? data[STORAGE_KEYS.enabled] : true;
+	const autoLearn = typeof data[STORAGE_KEYS.autoLearn] === "boolean" ? data[STORAGE_KEYS.autoLearn] : true;
+	const domains = Array.isArray(data[STORAGE_KEYS.domains]) ? data[STORAGE_KEYS.domains] : [];
+	return {enabled, domains, autoLearn};
+}
+
+async function setDefaultsIfMissing() {
+	const data = await chrome.storage.local.get([STORAGE_KEYS.enabled, STORAGE_KEYS.domains, STORAGE_KEYS.autoLearn]);
+	const next = {};
+	if (typeof data[STORAGE_KEYS.enabled] !== "boolean") next[STORAGE_KEYS.enabled] = true;
+	if (!Array.isArray(data[STORAGE_KEYS.domains])) next[STORAGE_KEYS.domains] = [];
+	if (typeof data[STORAGE_KEYS.autoLearn] !== "boolean") next[STORAGE_KEYS.autoLearn] = true;
+	if (Object.keys(next).length) await chrome.storage.local.set(next);
 }
 
 async function applyProxy() {
-    const { enabled, domains } = await getState();
+	const {enabled, domains} = await getState();
 
-    if (!enabled || domains.length === 0) {
-        chrome.proxy.settings.clear({ scope: "regular" });
-        return;
-    }
+	if (!enabled || !domains.length) {
+		chrome.proxy.settings.clear({scope: "regular"});
+		return;
+	}
 
-    const pac = buildPac(domains);
-
-    const config = {
-        mode: "pac_script",
-        pacScript: { data: pac },
-    };
-
-    chrome.proxy.settings.set({ value: config, scope: "regular" });
+	const pac = buildPac(domains);
+	chrome.proxy.settings.set({
+		value: {mode: "pac_script", pacScript: {data: pac}},
+		scope: "regular",
+	});
 }
 
-async function initDefaults() {
-    const data = await chrome.storage.local.get([STORAGE_KEYS.enabled, STORAGE_KEYS.domains]);
-    const next = {};
-    if (typeof data[STORAGE_KEYS.enabled] !== "boolean") next[STORAGE_KEYS.enabled] = true;
-    if (!Array.isArray(data[STORAGE_KEYS.domains])) next[STORAGE_KEYS.domains] = [];
-    if (Object.keys(next).length) await chrome.storage.local.set(next);
+// ---- batching (avoid writing/applying on every request) ----
+let memDomains = new Set();
+let flushTimer = null;
+
+async function initMemDomains() {
+	const {domains} = await getState();
+	memDomains = new Set((domains || []).map(normalizeDomain).filter(Boolean));
 }
 
-// Install / startup
-chrome.runtime.onInstalled.addListener(() => {
-    initDefaults().then(applyProxy);
-});
-chrome.runtime.onStartup.addListener(() => {
-    applyProxy();
+function scheduleFlush() {
+	if (flushTimer) return;
+	flushTimer = setTimeout(async () => {
+		flushTimer = null;
+		const next = uniqueSorted(Array.from(memDomains)).slice(0, LIMIT_DOMAINS);
+		await chrome.storage.local.set({[STORAGE_KEYS.domains]: next});
+		// applyProxy will be triggered by storage.onChanged, но пусть будет и тут (на случай редких гонок)
+		await applyProxy();
+	}, 1000);
+}
+
+function addLearnedDomain(hostname) {
+	const d = normalizeDomain(hostname);
+	if (!d) return;
+
+	// не добавляем мусор
+	if (d === "localhost") return;
+
+	if (!memDomains.has(d)) {
+		memDomains.add(d);
+
+		// cap in-memory too
+		if (memDomains.size > LIMIT_DOMAINS) {
+			// грубо урезаем (детерминированно): оставляем первые LIMIT_DOMAINS в сортировке
+			memDomains = new Set(uniqueSorted(Array.from(memDomains)).slice(0, LIMIT_DOMAINS));
+		}
+
+		scheduleFlush();
+	}
+}
+
+// ---- learn from tab requests ----
+function onBeforeRequest(details) {
+	// tabId >= 0 => request belongs to a tab
+	if (typeof details.tabId !== "number" || details.tabId < 0) return;
+
+	let url;
+	try {
+		url = new URL(details.url);
+	} catch {
+		return;
+	}
+
+	// Only tunnel network schemes we care about
+	if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "ws:" && url.protocol !== "wss:") {
+		return;
+	}
+
+	addLearnedDomain(url.hostname);
+}
+
+// ---- lifecycle ----
+chrome.runtime.onInstalled.addListener(async () => {
+	await setDefaultsIfMissing();
+	await initMemDomains();
+	await applyProxy();
 });
 
-// React on storage changes
-chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    if (changes[STORAGE_KEYS.enabled] || changes[STORAGE_KEYS.domains]) {
-        applyProxy();
-    }
+chrome.runtime.onStartup.addListener(async () => {
+	await setDefaultsIfMissing();
+	await initMemDomains();
+	await applyProxy();
 });
 
-// Messages from popup
+chrome.storage.onChanged.addListener(async (changes, area) => {
+	if (area !== "local") return;
+
+	// keep memDomains synced if domains changed externally
+	if (changes[STORAGE_KEYS.domains]) {
+		const next = Array.isArray(changes[STORAGE_KEYS.domains].newValue) ? changes[STORAGE_KEYS.domains].newValue : [];
+		memDomains = new Set(next.map(normalizeDomain).filter(Boolean));
+	}
+
+	if (changes[STORAGE_KEYS.enabled] || changes[STORAGE_KEYS.domains]) {
+		await applyProxy();
+	}
+});
+
+// register listener once
+chrome.webRequest.onBeforeRequest.addListener(
+	onBeforeRequest,
+	{urls: ["<all_urls>"]}
+);
+
+// ---- messages (optional: for popup) ----
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    (async () => {
-        try {
-            if (!msg || typeof msg.type !== "string") return sendResponse({ ok: false });
+	(async () => {
+		if (!msg || typeof msg.type !== "string") return sendResponse({ok: false});
 
-            if (msg.type === "getState") {
-                const { enabled, domains } = await getState();
-                return sendResponse({
-                    ok: true,
-                    enabled,
-                    domains,
-                    target: `${PROXY_HOST}:${PROXY_PORT}`,
-                });
-            }
+		if (msg.type === "getState") {
+			const s = await getState();
+			return sendResponse({
+				ok: true,
+				enabled: s.enabled,
+				autoLearn: s.autoLearn,
+				domainsCount: s.domains.length,
+				target: `${PROXY_HOST}:${PROXY_PORT}`,
+			});
+		}
 
-            if (msg.type === "setEnabled") {
-                await chrome.storage.local.set({ [STORAGE_KEYS.enabled]: !!msg.enabled });
-                return sendResponse({ ok: true });
-            }
+		if (msg.type === "setEnabled") {
+			await chrome.storage.local.set({[STORAGE_KEYS.enabled]: !!msg.enabled});
+			return sendResponse({ok: true});
+		}
 
-            if (msg.type === "addDomain") {
-                const { domains } = await getState();
-                const d = normalizeDomain(msg.domain);
-                if (!d) return sendResponse({ ok: false, error: "empty_domain" });
+		if (msg.type === "setAutoLearn") {
+			await chrome.storage.local.set({[STORAGE_KEYS.autoLearn]: !!msg.autoLearn});
+			return sendResponse({ok: true});
+		}
 
-                const next = uniqueSorted([...domains.map(normalizeDomain).filter(Boolean), d]);
-                await chrome.storage.local.set({ [STORAGE_KEYS.domains]: next });
-                return sendResponse({ ok: true, domains: next });
-            }
+		if (msg.type === "clearDomains") {
+			memDomains = new Set();
+			await chrome.storage.local.set({[STORAGE_KEYS.domains]: []});
+			await applyProxy();
+			return sendResponse({ok: true});
+		}
 
-            if (msg.type === "removeDomain") {
-                const { domains } = await getState();
-                const d = normalizeDomain(msg.domain);
-                const next = domains.map(normalizeDomain).filter(x => x && x !== d);
-                await chrome.storage.local.set({ [STORAGE_KEYS.domains]: next });
-                return sendResponse({ ok: true, domains: next });
-            }
+		return sendResponse({ok: false, error: "unknown_type"});
+	})();
 
-            if (msg.type === "setDomainEnabled") {
-                // enabled=true => add, enabled=false => remove
-                const { domains } = await getState();
-                const d = normalizeDomain(msg.domain);
-                if (!d) return sendResponse({ ok: false, error: "empty_domain" });
-
-                let next;
-                if (msg.enabled) {
-                    next = uniqueSorted([...domains.map(normalizeDomain).filter(Boolean), d]);
-                } else {
-                    next = domains.map(normalizeDomain).filter(x => x && x !== d);
-                }
-                await chrome.storage.local.set({ [STORAGE_KEYS.domains]: next });
-                return sendResponse({ ok: true, domains: next });
-            }
-
-            return sendResponse({ ok: false, error: "unknown_type" });
-        } catch (e) {
-            return sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
-        }
-    })();
-
-    return true; // keep the channel open for async
+	return true;
 });
