@@ -1,6 +1,6 @@
 // background.js (MV3)
 // Modes:
-// 1) tunnelAll=true  => fixed_servers SOCKS5 127.0.0.1:56130 for ALL traffic
+// 1) tunnelAll=true  => fixed_servers SOCKS5 127.0.0.1:5613 for ALL traffic
 // 2) tunnelAll=false => PAC: SOCKS5 only for domains in list, otherwise DIRECT
 //
 // Storage:
@@ -8,7 +8,7 @@
 // - domains: string[]  (rules; match host == rule OR host endsWith "."+rule)
 
 const PROXY_HOST = "127.0.0.1";
-const PROXY_PORT = 56130;
+const PROXY_PORT = 5613;
 
 const STORAGE_KEYS = {
 	tunnelAll: "tunnelAll",
